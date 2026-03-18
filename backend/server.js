@@ -297,6 +297,102 @@ function parseTableRow(line) {
   return cells.length > 1 ? cells : null;
 }
 
+function parseListMarker(line) {
+  const checkboxMatch = line.match(/^(\s*)([-+*])\s+\[( |x|X)\]\s+(.*)$/);
+  if (checkboxMatch) {
+    return {
+      indent: checkboxMatch[1].length,
+      listTag: "UL",
+      kind: "task",
+      checked: checkboxMatch[3].toLowerCase() === "x",
+      content: checkboxMatch[4]
+    };
+  }
+
+  const orderedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+  if (orderedMatch) {
+    return {
+      indent: orderedMatch[1].length,
+      listTag: "OL",
+      kind: "ordered",
+      checked: false,
+      content: orderedMatch[3]
+    };
+  }
+
+  const bulletMatch = line.match(/^(\s*)([-+*])\s+(.*)$/);
+  if (bulletMatch) {
+    return {
+      indent: bulletMatch[1].length,
+      listTag: "UL",
+      kind: "bullet",
+      checked: false,
+      content: bulletMatch[3]
+    };
+  }
+
+  return null;
+}
+
+function renderListItemHtml(marker, nestedHtml = "") {
+  if (marker.kind === "task") {
+    const checked = marker.checked ? " checked" : "";
+    return `<li class="task-item${checked ? " task-item-checked" : ""}"><input type="checkbox" class="task-checkbox" contenteditable="false"${checked}><span class="task-content${checked ? " task-content-checked" : ""}">${inlineMarkdown(marker.content)}</span>${nestedHtml}</li>`;
+  }
+
+  return `<li>${inlineMarkdown(marker.content)}${nestedHtml}</li>`;
+}
+
+function renderListBlock(lines, startIndex) {
+  const firstMarker = parseListMarker(lines[startIndex]);
+  if (!firstMarker) {
+    return null;
+  }
+
+  const listTag = firstMarker.listTag;
+  const baseIndent = firstMarker.indent;
+  const items = [];
+  let index = startIndex;
+
+  while (index < lines.length) {
+    const marker = parseListMarker(lines[index]);
+    if (!marker) {
+      break;
+    }
+
+    if (marker.indent < baseIndent) {
+      break;
+    }
+
+    if (marker.indent > baseIndent) {
+      const nestedList = renderListBlock(lines, index);
+      if (!nestedList || items.length === 0) {
+        break;
+      }
+      items[items.length - 1].nested.push(nestedList.html);
+      index = nestedList.nextIndex;
+      continue;
+    }
+
+    if (marker.listTag !== listTag) {
+      break;
+    }
+
+    items.push({
+      marker,
+      nested: []
+    });
+    index += 1;
+  }
+
+  return {
+    html: `<${listTag.toLowerCase()}>${items
+      .map((item) => renderListItemHtml(item.marker, item.nested.join("")))
+      .join("")}</${listTag.toLowerCase()}>`,
+    nextIndex: index
+  };
+}
+
 function isTableSeparatorRow(line, expectedColumns) {
   const cells = parseTableRow(line);
   if (!cells || cells.length !== expectedColumns) {
@@ -462,7 +558,6 @@ function markdownToHtml(markdown) {
       : body;
   const lines = cleanedBody.split("\n");
   const output = [];
-  let inList = false;
   let inCodeBlock = false;
   const paragraphBuffer = [];
 
@@ -473,18 +568,10 @@ function markdownToHtml(markdown) {
     }
   }
 
-  function closeList() {
-    if (inList) {
-      output.push("</ul>");
-      inList = false;
-    }
-  }
-
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (line.startsWith("```")) {
       flushParagraph();
-      closeList();
       output.push(inCodeBlock ? "</code></pre>" : "<pre><code>");
       inCodeBlock = !inCodeBlock;
       continue;
@@ -497,13 +584,11 @@ function markdownToHtml(markdown) {
 
     if (!line.trim()) {
       flushParagraph();
-      closeList();
       continue;
     }
 
     if (/^\s*---\s*$/.test(line)) {
       flushParagraph();
-      closeList();
       output.push("<hr>");
       continue;
     }
@@ -515,7 +600,6 @@ function markdownToHtml(markdown) {
       isTableSeparatorRow(lines[index + 1], headerCells.length)
     ) {
       flushParagraph();
-      closeList();
 
       const bodyRows = [];
       index += 2;
@@ -548,7 +632,6 @@ function markdownToHtml(markdown) {
     const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
     if (headingMatch) {
       flushParagraph();
-      closeList();
       const level = headingMatch[1].length;
       output.push(`<h${level}>${inlineMarkdown(headingMatch[2])}</h${level}>`);
       continue;
@@ -557,42 +640,22 @@ function markdownToHtml(markdown) {
     const quoteMatch = line.match(/^>\s?(.*)$/);
     if (quoteMatch) {
       flushParagraph();
-      closeList();
       output.push(`<blockquote>${inlineMarkdown(quoteMatch[1])}</blockquote>`);
       continue;
     }
 
-    const checkboxMatch = line.match(/^[-*]\s+\[( |x|X)\]\s+(.*)$/);
-    if (checkboxMatch) {
+    const listBlock = parseListMarker(line) ? renderListBlock(lines, index) : null;
+    if (listBlock) {
       flushParagraph();
-      if (!inList) {
-        output.push("<ul>");
-        inList = true;
-      }
-      const checked = checkboxMatch[1].toLowerCase() === "x" ? " checked" : "";
-      output.push(
-        `<li class="task-item${checked ? " task-item-checked" : ""}"><input type="checkbox" class="task-checkbox" contenteditable="false"${checked}><span class="task-content${checked ? " task-content-checked" : ""}">${inlineMarkdown(checkboxMatch[2])}</span></li>`
-      );
+      output.push(listBlock.html);
+      index = listBlock.nextIndex - 1;
       continue;
     }
 
-    const listMatch = line.match(/^[-*+]\s+(.*)$/);
-    if (listMatch) {
-      flushParagraph();
-      if (!inList) {
-        output.push("<ul>");
-        inList = true;
-      }
-      output.push(`<li>${inlineMarkdown(listMatch[1])}</li>`);
-      continue;
-    }
-
-    closeList();
     paragraphBuffer.push(line.trim());
   }
 
   flushParagraph();
-  closeList();
   if (inCodeBlock) {
     output.push("</code></pre>");
   }

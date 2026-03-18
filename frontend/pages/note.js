@@ -200,35 +200,10 @@ function serializeBlock(node) {
         .join("\n")
         .concat("\n\n");
     case "UL": {
-      const items = Array.from(element.children)
-        .filter((child) => child.tagName === "LI")
-        .map((child) => {
-          const checkbox = child.querySelector('input[type="checkbox"]');
-          const taskContent = child.querySelector(".task-content");
-          const content = taskContent
-            ? Array.from(taskContent.childNodes).map(serializeInline).join("").trim()
-            : Array.from(child.childNodes)
-                .filter((entry) => entry !== checkbox)
-                .map(serializeInline)
-                .join("")
-                .trim();
-          if (checkbox) {
-            return checkbox.checked ? `- [x] ${content}` : `- [ ] ${content}`;
-          }
-          return `- ${content}`;
-        })
-        .join("\n");
-      return items ? `${items}\n\n` : "";
+      return serializeList(element);
     }
     case "OL": {
-      const items = Array.from(element.children)
-        .filter((child) => child.tagName === "LI")
-        .map(
-          (child, index) =>
-            `${index + 1}. ${Array.from(child.childNodes).map(serializeInline).join("").trim()}`
-        )
-        .join("\n");
-      return items ? `${items}\n\n` : "";
+      return serializeList(element);
     }
     case "PRE": {
       const code = element.textContent || "";
@@ -270,6 +245,54 @@ function serializeBlock(node) {
     default:
       return inlineText ? `${inlineText}\n\n` : "";
   }
+}
+
+function serializeList(listElement, indentLevel = 0) {
+  const items = Array.from(listElement.children)
+    .filter((child) => child.tagName === "LI")
+    .map((child, index) => serializeListItem(child, listElement.tagName, indentLevel, index))
+    .filter(Boolean)
+    .join("\n");
+
+  return items ? `${items}\n` : "";
+}
+
+function serializeListItem(itemElement, listTagName, indentLevel, index) {
+  const indent = "  ".repeat(indentLevel);
+  const nestedLists = Array.from(itemElement.children).filter((child) =>
+    ["UL", "OL"].includes(child.tagName)
+  );
+  const checkbox = itemElement.querySelector(":scope > input[type='checkbox']");
+  const taskContent = itemElement.querySelector(":scope > .task-content");
+
+  let marker = "- ";
+  let content = "";
+
+  if (checkbox && taskContent) {
+    marker = checkbox.checked ? "- [x] " : "- [ ] ";
+    content = Array.from(taskContent.childNodes).map(serializeInline).join("").trim();
+  } else if (listTagName === "OL") {
+    marker = `${index + 1}. `;
+    content = Array.from(itemElement.childNodes)
+      .filter((child) => !nestedLists.includes(child))
+      .map(serializeInline)
+      .join("")
+      .trim();
+  } else {
+    content = Array.from(itemElement.childNodes)
+      .filter((child) => !nestedLists.includes(child))
+      .map(serializeInline)
+      .join("")
+      .trim();
+  }
+
+  const line = `${indent}${marker}${content}`.trimEnd();
+  const nestedMarkdown = nestedLists
+    .map((child) => serializeList(child, indentLevel + 1).trimEnd())
+    .filter(Boolean)
+    .join("\n");
+
+  return nestedMarkdown ? `${line}\n${nestedMarkdown}` : line;
 }
 
 function htmlToMarkdown(rootElement) {
@@ -626,10 +649,105 @@ function isTableSeparatorRow(line, expectedColumns) {
   return cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
+function parseListMarker(line) {
+  const checkboxMatch = line.match(/^(\s*)([-+*])\s+\[( |x|X)\]\s+(.*)$/);
+  if (checkboxMatch) {
+    return {
+      indent: checkboxMatch[1].length,
+      listTag: "UL",
+      kind: "task",
+      checked: checkboxMatch[3].toLowerCase() === "x",
+      content: checkboxMatch[4]
+    };
+  }
+
+  const orderedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+  if (orderedMatch) {
+    return {
+      indent: orderedMatch[1].length,
+      listTag: "OL",
+      kind: "ordered",
+      checked: false,
+      content: orderedMatch[3]
+    };
+  }
+
+  const bulletMatch = line.match(/^(\s*)([-+*])\s+(.*)$/);
+  if (bulletMatch) {
+    return {
+      indent: bulletMatch[1].length,
+      listTag: "UL",
+      kind: "bullet",
+      checked: false,
+      content: bulletMatch[3]
+    };
+  }
+
+  return null;
+}
+
+function renderListItemHtml(marker, nestedHtml = "") {
+  if (marker.kind === "task") {
+    const checked = marker.checked ? " checked" : "";
+    return `<li class="task-item${checked ? " task-item-checked" : ""}"><input type="checkbox" class="task-checkbox" contenteditable="false"${checked}><span class="task-content${checked ? " task-content-checked" : ""}">${renderInlineMarkdown(marker.content)}</span>${nestedHtml}</li>`;
+  }
+
+  return `<li>${renderInlineMarkdown(marker.content)}${nestedHtml}</li>`;
+}
+
+function renderListBlock(lines, startIndex) {
+  const firstMarker = parseListMarker(lines[startIndex]);
+  if (!firstMarker) {
+    return null;
+  }
+
+  const listTag = firstMarker.listTag;
+  const baseIndent = firstMarker.indent;
+  const items = [];
+  let index = startIndex;
+
+  while (index < lines.length) {
+    const marker = parseListMarker(lines[index]);
+    if (!marker) {
+      break;
+    }
+
+    if (marker.indent < baseIndent) {
+      break;
+    }
+
+    if (marker.indent > baseIndent) {
+      const nestedList = renderListBlock(lines, index);
+      if (!nestedList || items.length === 0) {
+        break;
+      }
+      items[items.length - 1].nested.push(nestedList.html);
+      index = nestedList.nextIndex;
+      continue;
+    }
+
+    if (marker.listTag !== listTag) {
+      break;
+    }
+
+    items.push({
+      marker,
+      nested: []
+    });
+    index += 1;
+  }
+
+  return {
+    html: `<${listTag.toLowerCase()}>${items
+      .map((item) => renderListItemHtml(item.marker, item.nested.join("")))
+      .join("")}</${listTag.toLowerCase()}>`,
+    nextIndex: index
+  };
+}
+
 function renderMarkdownBodyToHtml(markdown) {
   const lines = markdown.split("\n");
   const output = [];
-  let inList = false;
   let inCodeBlock = false;
   const paragraphBuffer = [];
 
@@ -640,18 +758,10 @@ function renderMarkdownBodyToHtml(markdown) {
     }
   }
 
-  function closeList() {
-    if (inList) {
-      output.push("</ul>");
-      inList = false;
-    }
-  }
-
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (line.startsWith("```")) {
       flushParagraph();
-      closeList();
       output.push(inCodeBlock ? "</code></pre>" : "<pre><code>");
       inCodeBlock = !inCodeBlock;
       continue;
@@ -664,13 +774,11 @@ function renderMarkdownBodyToHtml(markdown) {
 
     if (!line.trim()) {
       flushParagraph();
-      closeList();
       continue;
     }
 
     if (/^\s*---\s*$/.test(line)) {
       flushParagraph();
-      closeList();
       output.push("<hr>");
       continue;
     }
@@ -682,7 +790,6 @@ function renderMarkdownBodyToHtml(markdown) {
       isTableSeparatorRow(lines[index + 1], headerCells.length)
     ) {
       flushParagraph();
-      closeList();
 
       const bodyRows = [];
       index += 2;
@@ -715,7 +822,6 @@ function renderMarkdownBodyToHtml(markdown) {
     const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
     if (headingMatch) {
       flushParagraph();
-      closeList();
       const level = headingMatch[1].length;
       output.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
       continue;
@@ -724,42 +830,22 @@ function renderMarkdownBodyToHtml(markdown) {
     const quoteMatch = line.match(/^>\s?(.*)$/);
     if (quoteMatch) {
       flushParagraph();
-      closeList();
       output.push(`<blockquote>${renderInlineMarkdown(quoteMatch[1])}</blockquote>`);
       continue;
     }
 
-    const checkboxMatch = line.match(/^[-*]\s+\[( |x|X)\]\s+(.*)$/);
-    if (checkboxMatch) {
+    const listBlock = parseListMarker(line) ? renderListBlock(lines, index) : null;
+    if (listBlock) {
       flushParagraph();
-      if (!inList) {
-        output.push("<ul>");
-        inList = true;
-      }
-      const checked = checkboxMatch[1].toLowerCase() === "x" ? " checked" : "";
-      output.push(
-        `<li class="task-item${checked ? " task-item-checked" : ""}"><input type="checkbox" class="task-checkbox" contenteditable="false"${checked}><span class="task-content${checked ? " task-content-checked" : ""}">${renderInlineMarkdown(checkboxMatch[2])}</span></li>`
-      );
+      output.push(listBlock.html);
+      index = listBlock.nextIndex - 1;
       continue;
     }
 
-    const listMatch = line.match(/^[-*+]\s+(.*)$/);
-    if (listMatch) {
-      flushParagraph();
-      if (!inList) {
-        output.push("<ul>");
-        inList = true;
-      }
-      output.push(`<li>${renderInlineMarkdown(listMatch[1])}</li>`);
-      continue;
-    }
-
-    closeList();
     paragraphBuffer.push(line.trim());
   }
 
   flushParagraph();
-  closeList();
   if (inCodeBlock) {
     output.push("</code></pre>");
   }
@@ -891,6 +977,15 @@ function currentTaskItem(rootElement) {
   return block.classList?.contains("task-item") ? block : block.closest?.(".task-item") || null;
 }
 
+function currentListItem(rootElement) {
+  const block = currentBlockElement(rootElement);
+  if (!block) {
+    return null;
+  }
+
+  return block.tagName === "LI" ? block : block.closest?.("li") || null;
+}
+
 function currentTableRow(rootElement) {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || !rootElement) {
@@ -950,7 +1045,25 @@ function isEmptyStructuredItem(block) {
     return false;
   }
 
-  return Array.from(block.childNodes).every((node) => {
+  return listItemContentIsEmpty(block);
+}
+
+function listItemContentNodes(block) {
+  if (!block || block.tagName !== "LI") {
+    return [];
+  }
+
+  return Array.from(block.childNodes).filter((node) => {
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return true;
+    }
+
+    return !["UL", "OL"].includes(node.tagName);
+  });
+}
+
+function listItemContentIsEmpty(block) {
+  return listItemContentNodes(block).every((node) => {
     if (node.nodeType === Node.TEXT_NODE) {
       return !(node.textContent || "").trim();
     }
@@ -969,6 +1082,52 @@ function isEmptyStructuredItem(block) {
 
     return !(node.textContent || "").trim();
   });
+}
+
+function ensureListItemPlaceholder(item) {
+  if (!item || item.tagName !== "LI") {
+    return;
+  }
+
+  const taskContent = item.querySelector(":scope > .task-content");
+  if (taskContent) {
+    if (!taskContent.childNodes.length || !(taskContent.textContent || "").trim()) {
+      taskContent.innerHTML = "<br>";
+    }
+    return;
+  }
+
+  const contentNodes = listItemContentNodes(item);
+  const hasMeaningfulContent = contentNodes.some((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return Boolean((node.textContent || "").trim());
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+
+    return node.tagName !== "BR" && Boolean((node.textContent || "").trim());
+  });
+
+  if (hasMeaningfulContent) {
+    return;
+  }
+
+  const hasBreak = contentNodes.some(
+    (node) => node.nodeType === Node.ELEMENT_NODE && node.tagName === "BR"
+  );
+  if (hasBreak) {
+    return;
+  }
+
+  const firstNestedList = item.querySelector(":scope > ul, :scope > ol");
+  const placeholder = document.createElement("br");
+  if (firstNestedList) {
+    item.insertBefore(placeholder, firstNestedList);
+  } else {
+    item.appendChild(placeholder);
+  }
 }
 
 function isEffectivelyEmptyBlock(block) {
@@ -994,6 +1153,24 @@ function isEffectivelyEmptyBlock(block) {
     }
 
     return !(node.textContent || "").trim();
+  });
+}
+
+function fragmentHasMeaningfulContent(fragment) {
+  return Array.from(fragment.childNodes).some((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return Boolean((node.textContent || "").trim());
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+
+    if (node.tagName === "BR") {
+      return false;
+    }
+
+    return Boolean((node.textContent || "").trim()) || node.children.length > 0;
   });
 }
 
@@ -1028,6 +1205,247 @@ function selectionAtEndOfBlock(block) {
   endRange.selectNodeContents(block);
   endRange.collapse(false);
   return range.compareBoundaryPoints(Range.START_TO_START, endRange) === 0;
+}
+
+function selectionAtStartOfListItemContent(item) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !item) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed || !item.contains(range.startContainer)) {
+    return false;
+  }
+
+  const taskContent = item.querySelector(":scope > .task-content");
+  const contentRoot = taskContent || item;
+  const startRange = document.createRange();
+  startRange.selectNodeContents(contentRoot);
+  startRange.collapse(true);
+  return range.compareBoundaryPoints(Range.START_TO_START, startRange) === 0;
+}
+
+function focusListItem(item) {
+  if (!item) {
+    return;
+  }
+
+  const taskContent = item.querySelector(":scope > .task-content");
+  if (taskContent) {
+    placeCaretInsideTaskContent(item);
+    return;
+  }
+
+  const nestedList = item.querySelector(":scope > ul, :scope > ol");
+  if (nestedList) {
+    const textNode = Array.from(item.childNodes).find((child) => child.nodeType === Node.TEXT_NODE);
+    if (textNode) {
+      const range = document.createRange();
+      range.setStart(textNode, textNode.textContent?.length || 0);
+      range.collapse(true);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return;
+    }
+  }
+
+  placeCaretAtStart(item);
+}
+
+function deepestTrailingListItem(item) {
+  let current = item;
+
+  while (current) {
+    const nestedLists = Array.from(current.children).filter((child) => ["UL", "OL"].includes(child.tagName));
+    const lastNestedList = nestedLists[nestedLists.length - 1];
+    if (!lastNestedList) {
+      return current;
+    }
+
+    const childItems = Array.from(lastNestedList.children).filter((child) => child.tagName === "LI");
+    if (childItems.length === 0) {
+      return current;
+    }
+
+    current = childItems[childItems.length - 1];
+  }
+
+  return item;
+}
+
+function placeCaretAtEndOfListItemContent(item) {
+  if (!item) {
+    return;
+  }
+
+  const taskContent = item.querySelector(":scope > .task-content");
+  if (taskContent) {
+    placeCaretAtEnd(taskContent);
+    return;
+  }
+
+  const firstNestedList = item.querySelector(":scope > ul, :scope > ol");
+  if (!firstNestedList) {
+    placeCaretAtEnd(item);
+    return;
+  }
+
+  const range = document.createRange();
+  range.selectNodeContents(item);
+  range.setEndBefore(firstNestedList);
+  range.collapse(false);
+
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function findOrCreateNestedList(item, tagName) {
+  if (!item || !tagName) {
+    return null;
+  }
+
+  let nestedList = Array.from(item.children).find((child) => child.tagName === tagName);
+  if (!nestedList) {
+    nestedList = document.createElement(tagName);
+    item.appendChild(nestedList);
+  }
+  return nestedList;
+}
+
+function splitListItemAtSelection(rootElement) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed) {
+    return false;
+  }
+
+  const item = currentListItem(rootElement);
+  if (!item || !item.contains(range.startContainer)) {
+    return false;
+  }
+
+  const nestedLists = Array.from(item.children).filter((child) => ["UL", "OL"].includes(child.tagName));
+  const firstNestedList = nestedLists[0] || null;
+  const taskContent = item.querySelector(":scope > .task-content");
+  const splitRoot = taskContent || item;
+  if (!splitRoot) {
+    return false;
+  }
+
+  const tailRange = range.cloneRange();
+  if (firstNestedList && !taskContent) {
+    tailRange.setEndBefore(firstNestedList);
+  } else {
+    tailRange.setEnd(splitRoot, splitRoot.childNodes.length);
+  }
+
+  const tailFragment = tailRange.extractContents();
+  const newItem = taskContent ? createTaskListItem(false, "<br>") : document.createElement("li");
+
+  if (taskContent) {
+    const newContent = newItem.querySelector(".task-content");
+    newContent.innerHTML = "";
+    if (fragmentHasMeaningfulContent(tailFragment)) {
+      newContent.appendChild(tailFragment);
+    } else {
+      newContent.appendChild(document.createElement("br"));
+    }
+  } else if (fragmentHasMeaningfulContent(tailFragment)) {
+    newItem.appendChild(tailFragment);
+  } else {
+    newItem.appendChild(document.createElement("br"));
+  }
+
+  nestedLists.forEach((list) => {
+    newItem.appendChild(list);
+  });
+
+  item.insertAdjacentElement("afterend", newItem);
+
+  if (taskContent) {
+    placeCaretInsideTaskContent(newItem);
+  } else {
+    placeCaretAtStart(newItem);
+  }
+
+  return true;
+}
+
+function unwrapCurrentListItem(rootElement) {
+  const item = currentListItem(rootElement);
+  if (!item || !selectionAtStartOfListItemContent(item)) {
+    return false;
+  }
+
+  const list = item.parentElement;
+  if (!list || !["UL", "OL"].includes(list.tagName) || !list.parentNode) {
+    return false;
+  }
+
+  const paragraph = document.createElement("p");
+  const nestedLists = Array.from(item.children).filter((child) => ["UL", "OL"].includes(child.tagName));
+  const taskContent = item.querySelector(":scope > .task-content");
+  const contentNodes = taskContent
+    ? Array.from(taskContent.childNodes)
+    : listItemContentNodes(item);
+
+  const meaningfulNodes = contentNodes.filter((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return Boolean((node.textContent || "").trim());
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+
+    return node.tagName !== "BR" || contentNodes.length === 1;
+  });
+
+  if (meaningfulNodes.length > 0) {
+    meaningfulNodes.forEach((node) => {
+      paragraph.appendChild(node);
+    });
+  } else {
+    paragraph.appendChild(document.createElement("br"));
+  }
+
+  list.parentNode.insertBefore(paragraph, list.nextSibling);
+
+  let insertAfter = paragraph;
+  nestedLists.forEach((nestedList) => {
+    insertAfter.insertAdjacentElement("afterend", nestedList);
+    insertAfter = nestedList;
+  });
+
+  item.remove();
+  if (!list.children.length) {
+    list.remove();
+  }
+
+  if ((paragraph.textContent || "").trim()) {
+    placeCaretAtStart(paragraph);
+  } else {
+    placeCaretAtStart(paragraph);
+  }
+
+  return true;
+}
+
+function normalizeListItemPlaceholders(rootElement) {
+  if (!rootElement) {
+    return;
+  }
+
+  rootElement.querySelectorAll("li").forEach((item) => {
+    ensureListItemPlaceholder(item);
+  });
 }
 
 function revertInlineMarkdownTriggerSpace(rootElement) {
@@ -1085,8 +1503,57 @@ function revertStructuredBlockToMarkdown(rootElement) {
 
   if (isEmptyStructuredItem(block)) {
     const list = block.parentNode;
+    const previousItem = block.previousElementSibling?.tagName === "LI" ? block.previousElementSibling : null;
+    const nextItem = block.nextElementSibling?.tagName === "LI" ? block.nextElementSibling : null;
+    const parentItem = list?.closest?.("li") || null;
     const paragraph = document.createElement("p");
-    const checkbox = block.querySelector('input[type="checkbox"]');
+    const checkbox = block.querySelector(":scope > input[type='checkbox']");
+    const nestedLists = Array.from(block.children).filter((child) => ["UL", "OL"].includes(child.tagName));
+
+    if (previousItem || nextItem || parentItem) {
+      const promotedItems = [];
+      nestedLists.forEach((nestedList) => {
+        const children = Array.from(nestedList.children).filter((child) => child.tagName === "LI");
+        if (previousItem) {
+          const targetNestedList = findOrCreateNestedList(previousItem, nestedList.tagName);
+          children.forEach((child) => {
+            targetNestedList.appendChild(child);
+            promotedItems.push(child);
+          });
+        } else {
+          const insertBeforeNode = block.nextSibling;
+          children.forEach((child) => {
+            list.insertBefore(child, insertBeforeNode);
+            promotedItems.push(child);
+          });
+        }
+        nestedList.remove();
+      });
+
+      block.remove();
+
+      if (list && list.children.length === 0) {
+        list.remove();
+      }
+
+      if (previousItem) {
+        const trailingItem = promotedItems.length > 0
+          ? previousItem
+          : deepestTrailingListItem(previousItem);
+        ensureListItemPlaceholder(trailingItem);
+        placeCaretAtEndOfListItemContent(trailingItem);
+      } else if (promotedItems[0]) {
+        ensureListItemPlaceholder(promotedItems[0]);
+        focusListItem(promotedItems[0]);
+      } else if (nextItem) {
+        ensureListItemPlaceholder(nextItem);
+        focusListItem(nextItem);
+      } else if (parentItem) {
+        ensureListItemPlaceholder(parentItem);
+        placeCaretAtEndOfListItemContent(parentItem);
+      }
+      return true;
+    }
 
     if (checkbox) {
       paragraph.textContent = checkbox.checked ? "- [x] " : "- [ ] ";
@@ -1193,6 +1660,7 @@ export default function NotePage() {
     }
     editor.innerHTML = nextHtml || "<p></p>";
     ensureTrailingEditableParagraph(editor);
+    normalizeListItemPlaceholders(editor);
     normalizeLinkTargets(editor);
     normalizeInlineCaretBoundaries(editor);
   }
@@ -1739,6 +2207,7 @@ export default function NotePage() {
       return;
     }
     applyMarkdownShortcut(visualEditorRef.current, { allowInline: false });
+    normalizeListItemPlaceholders(visualEditorRef.current);
     dirtyRef.current = true;
     setStatus("Editing...");
     const nextBody = htmlToMarkdown(visualEditorRef.current);
@@ -1764,6 +2233,18 @@ export default function NotePage() {
 
   function handleVisualKeyDown(event) {
     if (!visualEditorRef.current) {
+      return;
+    }
+
+    if (event.key === "Tab") {
+      const insideList = Boolean(currentListItem(visualEditorRef.current));
+      const handled = event.shiftKey ? outdentCurrentListItem() : indentCurrentListItem();
+      if (insideList) {
+        event.preventDefault();
+      }
+      if (handled) {
+        handleVisualInput();
+      }
       return;
     }
 
@@ -1809,10 +2290,12 @@ export default function NotePage() {
         currentBlock.parentNode
       ) {
         event.preventDefault();
-        const nextItem = document.createElement("li");
-        nextItem.appendChild(document.createElement("br"));
-        currentBlock.insertAdjacentElement("afterend", nextItem);
-        placeCaretAtStart(nextItem);
+        if (!splitListItemAtSelection(visualEditorRef.current)) {
+          const nextItem = document.createElement("li");
+          nextItem.appendChild(document.createElement("br"));
+          currentBlock.insertAdjacentElement("afterend", nextItem);
+          placeCaretAtStart(nextItem);
+        }
         handleVisualInput();
         return;
       }
@@ -1820,12 +2303,20 @@ export default function NotePage() {
       const taskItem = currentTaskItem(visualEditorRef.current);
       if (taskItem) {
         event.preventDefault();
-        const nextTaskItem = createTaskListItem(false, "<br>");
-        taskItem.insertAdjacentElement("afterend", nextTaskItem);
-        placeCaretInsideTaskContent(nextTaskItem);
+        if (!splitListItemAtSelection(visualEditorRef.current)) {
+          const nextTaskItem = createTaskListItem(false, "<br>");
+          taskItem.insertAdjacentElement("afterend", nextTaskItem);
+          placeCaretInsideTaskContent(nextTaskItem);
+        }
         handleVisualInput();
         return;
       }
+    }
+
+    if (event.key === "Backspace" && unwrapCurrentListItem(visualEditorRef.current)) {
+      event.preventDefault();
+      handleVisualInput();
+      return;
     }
 
     if (event.key === "Backspace" && revertStructuredBlockToMarkdown(visualEditorRef.current)) {
@@ -1852,6 +2343,12 @@ export default function NotePage() {
     }
 
     if (revertInlineMarkdownTriggerSpace(visualEditorRef.current)) {
+      event.preventDefault();
+      handleVisualInput();
+      return;
+    }
+
+    if (unwrapCurrentListItem(visualEditorRef.current)) {
       event.preventDefault();
       handleVisualInput();
       return;
@@ -2144,6 +2641,72 @@ export default function NotePage() {
     placeCaretAtStart(item);
     handleVisualInput({ skipRevert: true });
     setFloatingToolsOpen(false);
+  }
+
+  function indentCurrentListItem() {
+    if (editorMode !== "visual" || !visualEditorRef.current) {
+      return false;
+    }
+    if (!ensureEditorSelection()) {
+      setFloatingToolsOpen(false);
+      return false;
+    }
+
+    const item = currentListItem(visualEditorRef.current);
+    const parentList = item?.parentElement;
+    const previousItem = item?.previousElementSibling;
+    if (!item || !parentList || previousItem?.tagName !== "LI") {
+      setFloatingToolsOpen(false);
+      return false;
+    }
+
+    const targetNestedList = findOrCreateNestedList(previousItem, parentList.tagName);
+    const childLists = Array.from(item.children).filter((child) => ["UL", "OL"].includes(child.tagName));
+
+    targetNestedList.appendChild(item);
+
+    let insertBeforeNode = item.nextSibling;
+    childLists.forEach((childList) => {
+      Array.from(childList.children)
+        .filter((child) => child.tagName === "LI")
+        .forEach((child) => {
+          targetNestedList.insertBefore(child, insertBeforeNode);
+        });
+      childList.remove();
+    });
+
+    ensureListItemPlaceholder(item);
+    focusListItem(item);
+    setFloatingToolsOpen(false);
+    return true;
+  }
+
+  function outdentCurrentListItem() {
+    if (editorMode !== "visual" || !visualEditorRef.current) {
+      return false;
+    }
+    if (!ensureEditorSelection()) {
+      setFloatingToolsOpen(false);
+      return false;
+    }
+
+    const item = currentListItem(visualEditorRef.current);
+    const parentList = item?.parentElement;
+    const parentItem = parentList?.closest("li");
+    const grandParentList = parentItem?.parentElement;
+    if (!item || !parentList || !parentItem || !grandParentList) {
+      setFloatingToolsOpen(false);
+      return false;
+    }
+
+    grandParentList.insertBefore(item, parentItem.nextSibling);
+    if (!parentList.children.length) {
+      parentList.remove();
+    }
+
+    focusListItem(item);
+    setFloatingToolsOpen(false);
+    return true;
   }
 
   function insertOrderedList() {
@@ -2640,6 +3203,26 @@ export default function NotePage() {
       title: "Checkbox",
       onClick: insertCheckbox,
       icon: <img src="/svg/checkbox.svg" alt="" aria-hidden="true" width="18" height="18" />
+    },
+    indent_right: {
+      label: "Indent right",
+      title: "Indent right",
+      onClick: () => {
+        if (indentCurrentListItem()) {
+          handleVisualInput();
+        }
+      },
+      icon: <img src="/svg/indent_right.svg" alt="" aria-hidden="true" width="18" height="18" />
+    },
+    indent_left: {
+      label: "Indent left",
+      title: "Indent left",
+      onClick: () => {
+        if (outdentCurrentListItem()) {
+          handleVisualInput();
+        }
+      },
+      icon: <img src="/svg/indent_left.svg" alt="" aria-hidden="true" width="18" height="18" />
     },
     divider: {
       label: "Divider",

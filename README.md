@@ -52,7 +52,7 @@ npm run dev
 
 ```bash
 cd frontend
-npm run dev
+npm start
 ```
 
 6. Open `http://<your-computer-ip>:3100` on your phone.

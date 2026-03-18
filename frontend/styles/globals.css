@@ -518,6 +518,7 @@ a {
 .visual-editor-surface h3,
 .visual-editor-surface p,
 .visual-editor-surface ul,
+.visual-editor-surface ol,
 .visual-editor-surface table,
 .visual-editor-surface blockquote,
 .visual-editor-surface pre {
@@ -530,8 +531,14 @@ a {
   color: #111111;
 }
 
-.visual-editor-surface ul {
+.visual-editor-surface ul,
+.visual-editor-surface ol {
   padding-left: 1.2rem;
+}
+
+.visual-editor-surface li > ul,
+.visual-editor-surface li > ol {
+  margin: 0.55rem 0 0;
 }
 
 .visual-editor-surface .task-item {
